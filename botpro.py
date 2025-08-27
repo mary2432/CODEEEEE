@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import os # <--- این خط اضافه شده
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
@@ -11,25 +12,60 @@ from telegram.ext import (
 )
 from collections import deque
 
-# تنظیمات لاگ‌گیری برای دیباگ بهتر
+# ... (بقیه کد شما بدون تغییر باقی می‌ماند) ...
+
+# --- توابع اصلی بات ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    context.user_data.clear()
+    if user_id in connected_pairs:
+        await end_chat_logic(user_id, context)
+    if user_id in waiting_queue:
+        del waiting_queue[user_id]
+    # *** تغییر اصلی اینجاست ***
+    await update.message.reply_text("به ربات 'بی نام چت' خوش آمدید! 😊\nبرای شروع، دکمه زیر را بزنید.", reply_markup=get_main_menu())
+
+# ... (تمام توابع دیگر شما بدون تغییر باقی می‌مانند) ...
+
+def main():
+    # توکن از متغیرهای مخفی خوانده می‌شود
+    TOKEN = os.environ.get('TOKEN') # <--- این خط تغییر کرده
+    if not TOKEN:
+        print("!!! توکن ربات در بخش Secrets تعریف نشده است !!!")
+        return
+
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+    application.add_error_handler(error_handler)
+    print("Bot is running...")
+    application.run_polling()
+
+if __name__ == "__main__":
+    # این بخش برای سازگاری با Replit خالی می‌ماند
+    # Replit به طور خودکار تابع main را از فایل اصلی اجرا می‌کند
+    # اما برای اطمینان، ما آن را اینجا هم فراخوانی می‌کنیم
+    main()
+
+# --- این بخش‌ها برای کامل بودن کد در اینجا تکرار شده‌اند ---
+# --- شما فقط باید خطوط مشخص شده را در کد خودتان تغییر دهید ---
+
+# ... (تمام کیبوردها و توابع دیگر که در کد اصلی شما وجود دارد) ...
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- تعریف متغیرهای سراسری ---
 # {user_id: {gender: 'male', partner_gender: 'female', age: '18_25', partner_age: 'any'}}
 waiting_queue = {}
 connected_pairs = {}
-
-# --- تعریف کیبوردهای شیشه‌ای (Inline) ---
 
 def get_main_menu():
     keyboard = [[InlineKeyboardButton("🤝 جستجوی پارتنر", callback_data="find_partner")], [InlineKeyboardButton("ℹ️ راهنما", callback_data="help")]]
     return InlineKeyboardMarkup(keyboard)
 
 def get_gender_menu():
-    # اولین مرحله دکمه بازگشت ندارد
     keyboard = [[InlineKeyboardButton("آقا 👨", callback_data="set_gender_male"), InlineKeyboardButton("خانم 👩", callback_data="set_gender_female")]]
     return InlineKeyboardMarkup(keyboard)
 
@@ -65,16 +101,6 @@ def get_cancel_menu():
 def get_in_chat_menu():
     keyboard = [[InlineKeyboardButton("❌ پایان چت", callback_data="end_chat")]]
     return InlineKeyboardMarkup(keyboard)
-
-# --- توابع اصلی بات ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    context.user_data.clear()
-    if user_id in connected_pairs:
-        await end_chat_logic(user_id, context)
-    if user_id in waiting_queue:
-        del waiting_queue[user_id]
-    await update.message.reply_text("به بات چت ناشناس خوش آمدید! 😊\nبرای شروع، دکمه زیر را بزنید.", reply_markup=get_main_menu())
 
 async def find_partner_logic(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     user_prefs = waiting_queue.get(user_id)
@@ -179,15 +205,3 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}", exc_info=context.error)
 
-def main():
-    TOKEN = "7721393045:AAEUli81XIrHQLoBZrj15oyVWH0aj0qr4kQ" # توکن خود را اینجا قرار دهید
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-    application.add_error_handler(error_handler)
-    print("Bot is running...")
-    application.run_polling()
-
-if __name__ == "__main__":
-    main()
