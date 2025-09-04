@@ -1,33 +1,15 @@
 import logging
-import asyncio
-import os
-from flask import Flask
-from threading import Thread
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+import sqlite3
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ConversationHandler,
     filters,
     ContextTypes,
 )
-from collections import deque
-
-# --- بخش وب سرور برای بیدار نگه داشتن ربات ---
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "I'm alive"
-
-def run():
-  app.run(host='0.0.0.0',port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-# ---------------------------------------------
 
 # تنظیمات لاگ‌گیری
 logging.basicConfig(
@@ -35,166 +17,208 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- تنظیمات دیتابیس ---
+def init_db():
+    """یک دیتابیس SQLite و جدول کاربران را می‌سازد."""
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        name TEXT,
+        age INTEGER,
+        gender TEXT
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+def get_user_profile(user_id):
+    """پروفایل کاربر را از دیتابیس می‌خواند."""
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT name, age, gender FROM users WHERE user_id = ?", (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    if user:
+        return {"name": user[0], "age": user[1], "gender": user[2]}
+    return None
+
+def update_user_profile(user_id, name, age, gender):
+    """پروفایل کاربر را در دیتابیس ذخیره یا به‌روزرسانی می‌کند."""
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO users (user_id, name, age, gender) VALUES (?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET name=excluded.name, age=excluded.age, gender=excluded.gender
+    """, (user_id, name, age, gender))
+    conn.commit()
+    conn.close()
+
 # --- تعریف متغیرهای سراسری ---
 waiting_queue = {}
 connected_pairs = {}
+# --- مراحل مکالمه برای ساخت پروفایل ---
+GET_NAME, GET_AGE, GET_GENDER = range(3)
 
-# --- تعریف کیبوردها (بدون تغییر) ---
-def get_main_menu():
-    keyboard = [[InlineKeyboardButton("🤝 جستجوی پارتنر", callback_data="find_partner")], [InlineKeyboardButton("ℹ️ راهنما", callback_data="help")]]
-    return InlineKeyboardMarkup(keyboard)
+# --- تعریف کیبوردها ---
+def get_reply_menu():
+    """دکمه دائمی منو را برمی‌گرداند."""
+    keyboard = [[KeyboardButton("☰ Menu")]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# ... (تمام توابع دیگر کیبورد بدون تغییر باقی می‌مانند) ...
-def get_gender_menu():
-    keyboard = [[InlineKeyboardButton("آقا 👨", callback_data="set_gender_male"), InlineKeyboardButton("خانم 👩", callback_data="set_gender_female")]]
-    return InlineKeyboardMarkup(keyboard)
+# --- توابع مکالمه ساخت پروفایل ---
+async def profile_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """شروع فرآیند ساخت پروفایل."""
+    await update.message.reply_text("برای ساخت پروفایل، لطفاً نام خود را وارد کنید:", reply_markup=None)
+    return GET_NAME
 
-def get_partner_gender_menu():
-    keyboard = [
-        [InlineKeyboardButton("آقا 👨", callback_data="set_partner_gender_male"), InlineKeyboardButton("خانم 👩", callback_data="set_partner_gender_female")],
-        [InlineKeyboardButton("فرقی نمی‌کند 🤷", callback_data="set_partner_gender_any")],
-        [InlineKeyboardButton("بازگشت 🔙", callback_data="back_to_gender")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نام کاربر را دریافت کرده و سوال بعدی را می‌پرسد."""
+    context.user_data['profile_name'] = update.message.text
+    await update.message.reply_text("عالی! حالا لطفاً سن خود را به عدد وارد کنید:")
+    return GET_AGE
 
-def get_age_menu():
-    keyboard = [
-        [InlineKeyboardButton("۱۸ تا ۲۵", callback_data="set_age_18_25"), InlineKeyboardButton("۲۶ تا ۳۵", callback_data="set_age_26_35")],
-        [InlineKeyboardButton("۳۶ تا ۴۵", callback_data="set_age_36_45"), InlineKeyboardButton("۴۵ به بالا", callback_data="set_age_45_plus")],
-        [InlineKeyboardButton("بازگشت 🔙", callback_data="back_to_partner_gender")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+async def get_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """سن کاربر را دریافت کرده و سوال بعدی را می‌پرسد."""
+    try:
+        age = int(update.message.text)
+        if not 18 <= age <= 99:
+            await update.message.reply_text("لطفاً یک سن معتبر بین ۱۸ تا ۹۹ وارد کنید.")
+            return GET_AGE
+        context.user_data['profile_age'] = age
+        keyboard = [
+            [InlineKeyboardButton("آقا 👨", callback_data="profile_gender_male")],
+            [InlineKeyboardButton("خانم 👩", callback_data="profile_gender_female")]
+        ]
+        await update.message.reply_text("بسیار خب. در نهایت، جنسیت خود را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return GET_GENDER
+    except ValueError:
+        await update.message.reply_text("لطفاً سن خود را فقط به صورت عدد وارد کنید.")
+        return GET_AGE
 
-def get_partner_age_menu():
-    keyboard = [
-        [InlineKeyboardButton("۱۸ تا ۲۵", callback_data="set_partner_age_18_25"), InlineKeyboardButton("۲۶ تا ۳۵", callback_data="set_partner_age_26_35")],
-        [InlineKeyboardButton("۳۶ تا ۴۵", callback_data="set_partner_age_36_45"), InlineKeyboardButton("۴۵ به بالا", callback_data="set_partner_age_45_plus")],
-        [InlineKeyboardButton("فرقی نمی‌کند 🤷", callback_data="set_partner_age_any")],
-        [InlineKeyboardButton("بازگشت 🔙", callback_data="back_to_age")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def get_cancel_menu():
-    keyboard = [[InlineKeyboardButton("❌ لغو جستجو", callback_data="cancel_search")]]
-    return InlineKeyboardMarkup(keyboard)
-
-def get_in_chat_menu():
-    keyboard = [[InlineKeyboardButton("❌ پایان چت", callback_data="end_chat")]]
-    return InlineKeyboardMarkup(keyboard)
-
-# --- توابع اصلی بات (بدون تغییر) ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    context.user_data.clear()
-    if user_id in connected_pairs:
-        await end_chat_logic(user_id, context)
-    if user_id in waiting_queue:
-        del waiting_queue[user_id]
-    await update.message.reply_text("به ربات 'بی نام چت' خوش آمدید! 😊\nبرای شروع، دکمه زیر را بزنید.", reply_markup=get_main_menu())
-
-# ... (تمام توابع دیگر ربات بدون تغییر باقی می‌مانند) ...
-async def find_partner_logic(user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    user_prefs = waiting_queue.get(user_id)
-    if not user_prefs: return
-    for partner_id, partner_prefs in list(waiting_queue.items()):
-        if user_id == partner_id: continue
-        user_wants_partner_gender = (user_prefs['partner_gender'] == partner_prefs['gender'] or user_prefs['partner_gender'] == 'any')
-        partner_wants_user_gender = (partner_prefs['partner_gender'] == user_prefs['gender'] or partner_prefs['partner_gender'] == 'any')
-        user_wants_partner_age = (user_prefs['partner_age'] == partner_prefs['age'] or user_prefs['partner_age'] == 'any')
-        partner_wants_user_age = (partner_prefs['partner_age'] == user_prefs['age'] or partner_prefs['partner_age'] == 'any')
-        if user_wants_partner_gender and partner_wants_user_gender and user_wants_partner_age and partner_wants_user_age:
-            del waiting_queue[user_id]
-            del waiting_queue[partner_id]
-            connected_pairs[user_id] = partner_id
-            connected_pairs[partner_id] = user_id
-            logger.info(f"Pair found: {user_id} and {partner_id}")
-            await context.bot.edit_message_text(chat_id=user_id, message_id=user_prefs['message_id'], text="یک پارتنر پیدا شد! 🎉")
-            await context.bot.edit_message_text(chat_id=partner_id, message_id=partner_prefs['message_id'], text="یک پارتنر پیدا شد! 🎉")
-            await context.bot.send_message(chat_id=user_id, text="حالا می‌توانید هر نوع پیامی ارسال کنید.", reply_markup=get_in_chat_menu())
-            await context.bot.send_message(chat_id=partner_id, text="حالا می‌توانید هر نوع پیامی ارسال کنید.", reply_markup=get_in_chat_menu())
-            return
-
-async def end_chat_logic(user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    if user_id in connected_pairs:
-        partner_id = connected_pairs.pop(user_id, None)
-        if partner_id: connected_pairs.pop(partner_id, None)
-        logger.info(f"Chat ended for user {user_id}")
-        await context.bot.send_message(chat_id=user_id, text="چت شما پایان یافت.", reply_markup=get_main_menu())
-        if partner_id: await context.bot.send_message(chat_id=partner_id, text="پارتنر شما چت را ترک کرد.", reply_markup=get_main_menu())
-        return True
-    return False
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def get_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """جنسیت کاربر را دریافت و پروفایل را ذخیره می‌کند."""
     query = update.callback_query
     await query.answer()
+    gender_map = {"profile_gender_male": "آقا", "profile_gender_female": "خانم"}
+    gender = gender_map.get(query.data)
+    
     user_id = query.from_user.id
-    command = query.data
-    if command == "back_to_gender":
-        await query.edit_message_text(text="جنسیت شما چیست؟", reply_markup=get_gender_menu())
-        return
-    if command == "back_to_partner_gender":
-        await query.edit_message_text(text="تمایل به گفتگو با چه کسی دارید؟", reply_markup=get_partner_gender_menu())
-        return
-    if command == "back_to_age":
-        await query.edit_message_text(text="محدوده سنی شما چیست؟", reply_markup=get_age_menu())
-        return
-    if command == "find_partner":
-        context.user_data['prefs'] = {}
-        await query.edit_message_text(text="جنسیت شما چیست؟", reply_markup=get_gender_menu())
-    elif command.startswith("set_gender_"):
-        context.user_data['prefs']['gender'] = command.split('_')[-1]
-        await query.edit_message_text(text="تمایل به گفتگو با چه کسی دارید؟", reply_markup=get_partner_gender_menu())
-    elif command.startswith("set_partner_gender_"):
-        context.user_data['prefs']['partner_gender'] = command.split('_')[-1]
-        await query.edit_message_text(text="محدوده سنی شما چیست؟", reply_markup=get_age_menu())
-    elif command.startswith("set_age_"):
-        context.user_data['prefs']['age'] = "_".join(command.split('_')[2:])
-        await query.edit_message_text(text="محدوده سنی پارتنر مورد نظر شما چیست؟", reply_markup=get_partner_age_menu())
-    elif command.startswith("set_partner_age_"):
-        context.user_data['prefs']['partner_age'] = "_".join(command.split('_')[3:])
-        msg = await query.edit_message_text(text="عالی! در حال جستجو بر اساس معیارهای شما...", reply_markup=get_cancel_menu())
-        waiting_queue[user_id] = context.user_data['prefs']
-        waiting_queue[user_id]['message_id'] = msg.message_id
-        await find_partner_logic(user_id, context)
-    elif command == "cancel_search":
-        if user_id in waiting_queue: del waiting_queue[user_id]
-        context.user_data.clear()
-        await query.edit_message_text(text="جستجو لغو شد.", reply_markup=get_main_menu())
-    elif command == "end_chat":
-        await query.edit_message_text(text="چت پایان یافت.")
-        await end_chat_logic(user_id, context)
-    elif command == "help":
-        help_text = "راهنمای بات چت ناشناس:\n\nبا انتخاب گزینه‌ها، به ربات کمک می‌کنید تا بهترین پارتنر را برای شما پیدا کند."
-        await query.edit_message_text(text=help_text, reply_markup=get_main_menu())
+    name = context.user_data['profile_name']
+    age = context.user_data['profile_age']
+    
+    update_user_profile(user_id, name, age, gender)
+    
+    await query.edit_message_text(f"پروفایل شما با موفقیت تکمیل شد! ✅\n\n"
+                                  f"برای دیدن منوی اصلی، دکمه '☰ Menu' را بزنید.")
+    return ConversationHandler.END
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """فرآیند ساخت پروفایل را لغو می‌کند."""
+    await update.message.reply_text("ساخت پروفایل لغو شد.", reply_markup=get_reply_menu())
+    return ConversationHandler.END
+
+
+# --- توابع اصلی بات ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دستور /start را مدیریت می‌کند."""
     user_id = update.effective_user.id
-    if user_id in connected_pairs:
-        partner_id = connected_pairs[user_id]
-        await context.bot.copy_message(chat_id=partner_id, from_chat_id=user_id, message_id=update.message.message_id)
+    profile = get_user_profile(user_id)
+    
+    if profile:
+        await update.message.reply_text("به ربات 'بی نام چت' خوش آمدید!", reply_markup=get_reply_menu())
+        await show_main_menu(update, context)
     else:
-        await update.message.reply_text("شما به کسی متصل نیستید.", reply_markup=get_main_menu())
+        keyboard = [[InlineKeyboardButton("✅ تکمیل پروفایل", callback_data="start_profile_setup")]]
+        await update.message.reply_text(
+            "🔔 فقط چند قدم تا تکمیل پروفایل شما باقی مانده!\n\n"
+            "برای شروع گفتگو، ابتدا باید اطلاعات پروفایل خود (نام، سن، جنسیت) را تکمیل کنید.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Update {update} caused error {context.error}", exc_info=context.error)
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """منوی اصلی را به همراه اطلاعات پروفایل نمایش می‌دهد."""
+    user_id = update.effective_user.id
+    profile = get_user_profile(user_id)
+    
+    if not profile:
+        keyboard = [[InlineKeyboardButton("✅ تکمیل پروفایل", callback_data="start_profile_setup")]]
+        await update.message.reply_text(
+            "شما هنوز پروفایل خود را تکمیل نکرده‌اید!",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    text = (
+        f"👤 **پروفایل شما**\n\n"
+        f"🔸 **نام:** {profile['name']}\n"
+        f"🔸 **سن:** {profile['age']}\n"
+        f"🔸 **جنسیت:** {profile['gender']}\n\n"
+        "از منوی زیر استفاده کنید:"
+    )
+    keyboard = [
+        [InlineKeyboardButton("🤝 جستجوی پارتنر", callback_data="find_partner")],
+        [InlineKeyboardButton("📝 ویرایش پروفایل", callback_data="edit_profile")]
+    ]
+    
+    # اطمینان از ارسال پیام جدید به جای ویرایش
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await update.callback_query.answer()
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """کلیک روی دکمه‌های شیشه‌ای را مدیریت می‌کند."""
+    query = update.callback_query
+    command = query.data
+
+    if command == "start_profile_setup":
+        # این دکمه کاربر را به مکالمه ساخت پروفایل هدایت می‌کند
+        # اما خود مکالمه از طریق CommandHandler شروع می‌شود.
+        await query.message.reply_text("برای شروع ساخت پروفایل، دستور /profile را ارسال کنید.")
+        await query.answer()
+    elif command == "edit_profile":
+        await query.message.reply_text("برای ویرایش پروفایل، دستور /profile را ارسال کنید.")
+        await query.answer()
+    # ... سایر دکمه‌های آینده در اینجا مدیریت می‌شوند ...
 
 
 def main():
-    TOKEN = os.environ.get('TOKEN')
-    if not TOKEN:
-        print("!!! توکن ربات در بخش Secrets تعریف نشده است !!!")
-        return
+    """تابع اصلی برای راه‌اندازی ربات."""
+    # ساخت دیتابیس در اولین اجرا
+    init_db()
 
-    # وب سرور را برای بیدار نگه داشتن ربات اجرا کن
-    keep_alive()
-
+    TOKEN = "7721393045:AAEUli81XIrHQLoBZrj15oyVWH0aj0qr4kQ"
+    
     application = Application.builder().token(TOKEN).build()
+
+    # تعریف مکالمه ساخت پروفایل
+    profile_conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler('profile', profile_start),
+            CallbackQueryHandler(profile_start, pattern='^start_profile_setup$'),
+            CallbackQueryHandler(profile_start, pattern='^edit_profile$')
+        ],
+        states={
+            GET_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
+            GET_AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_age)],
+            GET_GENDER: [CallbackQueryHandler(get_gender, pattern='^profile_gender_')],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_profile)],
+    )
+
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(profile_conv_handler)
     application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-    application.add_error_handler(error_handler)
+    # Handler برای دکمه "Menu"
+    application.add_handler(MessageHandler(filters.Regex('^☰ Menu$'), show_main_menu))
+    
     print("Bot is running...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
+
